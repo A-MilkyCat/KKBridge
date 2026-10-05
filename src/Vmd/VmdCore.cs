@@ -442,10 +442,20 @@ namespace KKBridge.Vmd
     public class VmdBoneProcessor
     {
         private readonly ManualLogSource _logger;
+        private readonly bool _normalizeRootToFirstFrame;
 
-        public VmdBoneProcessor(ManualLogSource logger = null)
+        private sealed class RootReference
+        {
+            public Vector3 Position;
+            public Quaternion Rotation;
+        }
+
+        private readonly Dictionary<Transform, RootReference> _rootReferences = new Dictionary<Transform, RootReference>();
+
+        public VmdBoneProcessor(ManualLogSource logger = null, bool normalizeRootToFirstFrame = false)
         {
             _logger = logger;
+            _normalizeRootToFirstFrame = normalizeRootToFirstFrame;
         }
 
         /// <summary>
@@ -459,6 +469,18 @@ namespace KKBridge.Vmd
                 _logger?.LogError("Character root transform is null. Skipping.");
                 return frameList;
             }
+            if (_normalizeRootToFirstFrame &&
+                boneCache.TryGetValue("cf_n_height", out var rootTf) &&
+                !_rootReferences.ContainsKey(rootTf))
+            {
+                _rootReferences[rootTf] = new RootReference
+                {
+                    Position = rootTf.position,
+                    Rotation = rootTf.rotation
+                };
+                _logger?.LogInfo($"Captured root reference for '{instanceRootTf.name}': pos={rootTf.position}, rot={rootTf.rotation}");
+            }
+
             ProcessBoneRecursive(instanceRootTf, boneCache, frameList);
             return frameList;
         }
@@ -480,8 +502,19 @@ namespace KKBridge.Vmd
                 // --- 統一旋轉計算邏輯 ---
                 if (currentEntry.MmdParentName == null)
                 {
-                    // 情況1: 是根骨骼 (父物件名為 null)，直接使用世界旋轉
-                    finalRot = bone.rotation;
+                    // 情況1: 是根骨骼 (父物件名為 null)。
+                    // 可選擇將第一個採樣影格視為原點，移除 CharaStudio 場景中的初始擺放位置與朝向，
+                    // 但保留後續真正的 root motion。
+                    if (_normalizeRootToFirstFrame &&
+                        currentEntry.MmdName == "全ての親" &&
+                        _rootReferences.TryGetValue(bone, out var rootReference))
+                    {
+                        finalRot = Quaternion.Inverse(rootReference.Rotation) * bone.rotation;
+                    }
+                    else
+                    {
+                        finalRot = bone.rotation;
+                    }
                 }
                 else
                 {
@@ -507,8 +540,18 @@ namespace KKBridge.Vmd
                 {
                     if (boneCache.TryGetValue("cf_j_hips", out var hipsTf))
                     {
-                        // 根骨骼用 World Position
-                        finalPos = bone.position;
+                        // 根骨骼原本使用 World Position。
+                        // Normalize 開啟時，先轉成「第一採樣影格 root」的局部空間：
+                        // frame 0 會落在原點，後續相對位移與旋轉仍完整保留。
+                        if (_normalizeRootToFirstFrame &&
+                            _rootReferences.TryGetValue(bone, out var rootReference))
+                        {
+                            finalPos = Quaternion.Inverse(rootReference.Rotation) * (bone.position - rootReference.Position);
+                        }
+                        else
+                        {
+                            finalPos = bone.position;
+                        }
 
                         // 應用 Pivot 補正
                         // PMX的全ての親在腳後跟(嚴格T-pose姿勢)
