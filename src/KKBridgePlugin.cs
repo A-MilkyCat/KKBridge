@@ -125,6 +125,7 @@ namespace KKBridge
         private Text _exportButtonText;
         private ConfigEntry<KeyboardShortcut> _toggleWindowHotkey;
         private ConfigEntry<string> _outputDirectory;
+        private ConfigEntry<bool> _normalizeRootToFirstFrame;
 
         private void Awake()
         {
@@ -146,6 +147,13 @@ namespace KKBridge
                     "Output Directory", // 設定的名稱
                     defaultOutputPath, // 預設值
                     "Export destination folder." // 滑鼠懸停時顯示的說明文字
+                );
+
+                _normalizeRootToFirstFrame = Config.Bind(
+                    "Export Settings",
+                    "Normalize Root To First Frame",
+                    true,
+                    "Remove the character's initial CharaStudio world placement from 全ての親 while preserving later root motion."
                 );
             }
 
@@ -608,7 +616,7 @@ namespace KKBridge
                 Time.captureFramerate = fps;
 
                 // --- 階段二：初始化資料結構並開始錄製 ---
-                var boneProcessor = new VmdBoneProcessor(Log);
+                var boneProcessor = new VmdBoneProcessor(Log, _normalizeRootToFirstFrame.Value);
                 var morphProcessor = new VmdMorphProcessor(Log);
                 var cameraProcessor = new VmdCameraProcessor(Log);
 
