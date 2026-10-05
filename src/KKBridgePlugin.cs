@@ -455,9 +455,25 @@ namespace KKBridge
             float eyeSmile = SourceWeight(frame, "eye_face.f00_egao_cl");
             float eyeDefaultClosed = SourceWeight(frame, "eye_face.f00_def_cl");
 
-            // Treat only the very closed end of def_cl as a real blink/held-eye-close.
-            // This deliberately ignores the common 0.4~0.6 half-lid values that looked nearly neutral on Shenhe.
-            float blink = Mathf.Clamp01((eyeDefaultClosed - 0.85f) / 0.15f);
+            // Calibrated eyelid curve:
+            // ~0.50 and below: visually close enough to neutral on Shenhe
+            // 0.737: the confirmed half-closed source state -> mabataki 0.65
+            // 0.989+: confirmed fully-closed source state -> mabataki 1.0
+            float blink = 0f;
+            if (eyeDefaultClosed > 0.50f)
+            {
+                if (eyeDefaultClosed <= 0.7372f)
+                {
+                    blink = 0.65f * Mathf.InverseLerp(0.50f, 0.7372f, eyeDefaultClosed);
+                }
+                else
+                {
+                    blink = Mathf.Lerp(
+                        0.65f,
+                        1.00f,
+                        Mathf.InverseLerp(0.7372f, 0.9891f, eyeDefaultClosed));
+                }
+            }
             AddMax(output, n, "まばたき", blink);
             AddMax(output, n, "笑い", eyeSmile);
 
@@ -468,6 +484,8 @@ namespace KKBridge
 
             float mouthAkire = SourceWeight(frame, "kuti_face.f00_akire_op");
             float mouthOdoro = SourceWeight(frame, "kuti_face.f00_odoro_op");
+            float mouthOdoroSmall = SourceWeight(frame, "kuti_face.f00_odoro_s_op");
+            float mouthPattern18 = frame.MouthPattern == 18 ? 1f : 0f;
             float mouthIS = SourceWeight(frame, "kuti_face.f00_i_s_op");
             float mouthIkariOpen = SourceWeight(frame, "kuti_face.f00_ikari_op");
             float mouthKeno = SourceWeight(frame, "kuti_face.f00_keno_op");
@@ -479,7 +497,7 @@ namespace KKBridge
                 SourceWeight(frame, "kuti_face.f00_ikari02_op"));
 
             float anyCalibratedMouth = Mathf.Max(
-                Mathf.Max(mouthAkire, mouthOdoro),
+                Mathf.Max(mouthAkire, Mathf.Max(mouthOdoro, Mathf.Max(mouthOdoroSmall, mouthPattern18))),
                 Mathf.Max(mouthIS, Mathf.Max(mouthIkariOpen, Mathf.Max(mouthKeno, Mathf.Max(mouthSinken03, mouthIkariPair)))));
 
             // 9.60s anchor: closed smile eye + worried brow + smiling E mouth.
@@ -514,6 +532,16 @@ namespace KKBridge
             {
                 AddMax(output, n, "困る", 0.40f * mouthOdoro);
                 AddMax(output, n, "お", 1.00f * mouthOdoro);
+            }
+
+            // Pattern 18 / odoro_s anchor: rounded-open but horizontally narrow mouth.
+            // Some captures have no live face BlendShapes for the early part of the scene,
+            // so MouthPattern 18 is used as the stable fallback for this calibrated pose.
+            float mouthOdoroSmallState = Mathf.Max(mouthOdoroSmall, mouthPattern18);
+            if (mouthOdoroSmallState > 1E-04f)
+            {
+                AddMax(output, n, "お", 0.80f * mouthOdoroSmallState);
+                AddMax(output, n, "口横狭め", 0.40f * mouthOdoroSmallState);
             }
 
             // 2.20s anchor: slight smile/teeth geometry, deliberately very little E.
