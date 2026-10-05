@@ -115,6 +115,74 @@ namespace KKBridge
         }
     }
 
+    /// <summary>
+    /// Raw facial state sampled directly from the live Koikatsu character after Timeline/runtime updates.
+    /// This intentionally stores semantic/control channels only and does NOT guess any PMX/BlendShape mapping.
+    /// </summary>
+    internal sealed class RawFacialFrame
+    {
+        public uint FrameNumber;
+        public float TimelineTime;
+        public int EyebrowPattern;
+        public float EyebrowOpen;
+        public int EyesPattern;
+        public float EyesOpen;
+        public int MouthPattern;
+        public float MouthOpen;
+    }
+
+    internal static class RawFacialExporter
+    {
+        public static RawFacialFrame Capture(OCIChar ociChar, uint frameNumber, float timelineTime)
+        {
+            if (ociChar == null || ociChar.charInfo == null) return null;
+
+            ChaControl cha = ociChar.charInfo;
+            return new RawFacialFrame
+            {
+                FrameNumber = frameNumber,
+                TimelineTime = timelineTime,
+                EyebrowPattern = cha.GetEyebrowPtn(),
+                EyebrowOpen = cha.GetEyebrowOpenMax(),
+                EyesPattern = cha.GetEyesPtn(),
+                EyesOpen = cha.GetEyesOpenMax(),
+                MouthPattern = cha.GetMouthPtn(),
+                MouthOpen = cha.GetMouthOpenMax()
+            };
+        }
+
+        public static void Export(IList<RawFacialFrame> frames, int fps, string path)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\n");
+            sb.Append("  \"format\": \"KKBridgeRawFacialV1\",\n");
+            sb.Append("  \"fps\": ").Append(fps.ToString(CultureInfo.InvariantCulture)).Append(",\n");
+            sb.Append("  \"channels\": [\"eyebrow_pattern\", \"eyebrow_open\", \"eyes_pattern\", \"eyes_open\", \"mouth_pattern\", \"mouth_open\"],\n");
+            sb.Append("  \"frames\": [\n");
+
+            for (int i = 0; i < frames.Count; i++)
+            {
+                RawFacialFrame f = frames[i];
+                sb.Append("    {");
+                sb.Append("\"frame\":").Append(f.FrameNumber.ToString(CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"time\":").Append(f.TimelineTime.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyebrow_pattern\":").Append(f.EyebrowPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyebrow_open\":").Append(f.EyebrowOpen.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyes_pattern\":").Append(f.EyesPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyes_open\":").Append(f.EyesOpen.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"mouth_pattern\":").Append(f.MouthPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"mouth_open\":").Append(f.MouthOpen.ToString("R", CultureInfo.InvariantCulture));
+                sb.Append("}");
+                if (i + 1 < frames.Count) sb.Append(",");
+                sb.Append("\n");
+            }
+
+            sb.Append("  ]\n");
+            sb.Append("}\n");
+            File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+        }
+    }
+
     [BepInPlugin("com.rintrint.kkbridge", "KKBridge", "0.0.6")]
     public class KKBridgePlugin : BaseUnityPlugin
     {
@@ -126,6 +194,7 @@ namespace KKBridge
         private ConfigEntry<KeyboardShortcut> _toggleWindowHotkey;
         private ConfigEntry<string> _outputDirectory;
         private ConfigEntry<bool> _normalizeRootToFirstFrame;
+        private ConfigEntry<bool> _exportRawFacialJson;
 
         private void Awake()
         {
@@ -154,6 +223,13 @@ namespace KKBridge
                     "Normalize Root To First Frame",
                     true,
                     "Remove the character's initial CharaStudio world placement from 全ての親 while preserving later root motion."
+                );
+
+                _exportRawFacialJson = Config.Bind(
+                    "Export Settings",
+                    "Export Raw Facial JSON",
+                    true,
+                    "Export raw KK facial control channels next to the VMD. No PMX/BlendShape remapping is applied."
                 );
             }
 
@@ -622,6 +698,7 @@ namespace KKBridge
 
                 var allCharactersBoneFrames = new Dictionary<OCIChar, List<VmdBoneFrame>>();
                 var allCharactersMorphFrames = new Dictionary<OCIChar, List<VmdMorphFrame>>();
+                var allCharactersRawFacialFrames = new Dictionary<OCIChar, List<RawFacialFrame>>();
                 var allCameraFrames = new List<VmdCameraFrame>();
 
                 var characterBoneCaches = new Dictionary<OCIChar, Dictionary<string, Transform>>();
@@ -630,6 +707,7 @@ namespace KKBridge
                     // 為每個角色創建 VMD 影格列表
                     allCharactersBoneFrames[ociChar] = new List<VmdBoneFrame>();
                     allCharactersMorphFrames[ociChar] = new List<VmdMorphFrame>();
+                    allCharactersRawFacialFrames[ociChar] = new List<RawFacialFrame>();
 
                     // 為每個角色預先建立並儲存骨骼快取
                     var boneCacheForChar = new Dictionary<string, Transform>();
@@ -701,6 +779,15 @@ namespace KKBridge
                         }
                         // 將當前影格的數據添加到對應角色的列表中
                         allCharactersBoneFrames[ociChar].AddRange(singleFrameBoneData);
+
+                        if (_exportRawFacialJson.Value)
+                        {
+                            RawFacialFrame rawFaceFrame = RawFacialExporter.Capture(ociChar, (uint)currentFrame, currentTime);
+                            if (rawFaceFrame != null)
+                            {
+                                allCharactersRawFacialFrames[ociChar].Add(rawFaceFrame);
+                            }
+                        }
 
                         List<VmdMorphFrame> singleFrameMorphData = morphProcessor.ProcessCharacter(ociChar, (uint)currentFrame);
                         allCharactersMorphFrames[ociChar].AddRange(singleFrameMorphData);
@@ -832,6 +919,22 @@ namespace KKBridge
                     {
                         Log.LogError($"Failed to export VMD for character {charName}: {e.Message}");
                     }
+
+                    if (_exportRawFacialJson.Value)
+                    {
+                        try
+                        {
+                            string faceFileName = CreateSafeFileName(charIndex, "_", charName, "_face_raw", ".json");
+                            string faceFilePath = Path.Combine(outputDirectory, faceFileName);
+                            RawFacialExporter.Export(allCharactersRawFacialFrames[ociChar], fps, faceFilePath);
+                            Log.LogInfo($"Successfully exported raw facial data to: {faceFilePath}");
+                        }
+                        catch (Exception e)
+                        {
+                            Log.LogError($"Failed to export raw facial data for character {charName}: {e.Message}");
+                        }
+                    }
+
                     charIndex++;
                 }
 
