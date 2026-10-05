@@ -469,6 +469,7 @@ namespace KKBridge
             float mouthAkire = SourceWeight(frame, "kuti_face.f00_akire_op");
             float mouthOdoro = SourceWeight(frame, "kuti_face.f00_odoro_op");
             float mouthIS = SourceWeight(frame, "kuti_face.f00_i_s_op");
+            float mouthIkariOpen = SourceWeight(frame, "kuti_face.f00_ikari_op");
             float mouthKeno = SourceWeight(frame, "kuti_face.f00_keno_op");
             float mouthSinken03 = Mathf.Max(
                 SourceWeight(frame, "kuti_face.f00_sinken03_cl"),
@@ -479,7 +480,7 @@ namespace KKBridge
 
             float anyCalibratedMouth = Mathf.Max(
                 Mathf.Max(mouthAkire, mouthOdoro),
-                Mathf.Max(mouthIS, Mathf.Max(mouthKeno, Mathf.Max(mouthSinken03, mouthIkariPair))));
+                Mathf.Max(mouthIS, Mathf.Max(mouthIkariOpen, Mathf.Max(mouthKeno, Mathf.Max(mouthSinken03, mouthIkariPair)))));
 
             // 9.60s anchor: closed smile eye + worried brow + smiling E mouth.
             if (eyeSmile > 1E-04f)
@@ -535,6 +536,14 @@ namespace KKBridge
                 AddMax(output, n, "困る", 0.50f * mouthIkariPair);
                 AddMax(output, n, "口横広げ", 0.35f * mouthIkariPair);
                 AddMax(output, n, "え", 0.50f * mouthIkariPair);
+            }
+
+            // Fine-tune for the ikari_op-heavy mouth family: keep the existing
+            // ikari_cl-derived shape, but add the slight rounded opening seen in this scene.
+            if (mouthIkariOpen > 1E-04f)
+            {
+                // The calibrated source state is ~70% ikari_op and visually needs O ~= 0.20.
+                AddMax(output, n, "お", Mathf.Clamp01(mouthIkariOpen * 0.2854f));
             }
 
             // 0.00s anchor: closed/tense baseline; the mouth itself was subtle enough to omit.
