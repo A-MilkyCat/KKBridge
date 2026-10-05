@@ -423,6 +423,50 @@ namespace KKBridge
             return Mathf.Clamp01(maxWeight);
         }
 
+        private static bool IsKnownCalibratedMouthShape(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            switch (name)
+            {
+                case "kuti_face.f00_akire_op":
+                case "kuti_face.f00_odoro_op":
+                case "kuti_face.f00_odoro_s_op":
+                case "kuti_face.f00_i_s_op":
+                case "kuti_face.f00_ikari_op":
+                case "kuti_face.f00_ikari_cl":
+                case "kuti_face.f00_ikari02_op":
+                case "kuti_face.f00_keno_op":
+                case "kuti_face.f00_sinken03_cl":
+                case "kuti_face.f00_sinken03_op":
+                case "kuti_face.f00_a_l_op":
+                case "kuti_face.f00_n_l_cl":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static float UnknownMouthOpenWeight(RawFacialFrame frame)
+        {
+            if (frame == null || frame.BlendShapes == null) return 0f;
+
+            float maxWeight = 0f;
+            foreach (var sample in frame.BlendShapes)
+            {
+                if (sample == null) continue;
+                if (!string.Equals(sample.RendererName, "cf_O_face", StringComparison.Ordinal)) continue;
+
+                string name = sample.BlendShapeName;
+                if (string.IsNullOrEmpty(name)) continue;
+                if (!name.StartsWith("kuti_face.", StringComparison.Ordinal)) continue;
+                if (!name.EndsWith("_op", StringComparison.Ordinal)) continue;
+                if (IsKnownCalibratedMouthShape(name)) continue;
+
+                maxWeight = Mathf.Max(maxWeight, sample.WeightPercent * 0.01f);
+            }
+            return Mathf.Clamp01(maxWeight);
+        }
+
         private static void AddMax(Dictionary<string, VmdMorphFrame> frames, uint frameNumber, string morphName, float weight)
         {
             weight = Mathf.Clamp01(weight);
@@ -504,6 +548,9 @@ namespace KKBridge
             float mouthOdoro = SourceWeight(frame, "kuti_face.f00_odoro_op");
             float mouthOdoroSmall = SourceWeight(frame, "kuti_face.f00_odoro_s_op");
             float mouthPattern18 = frame.MouthPattern == 18 ? 1f : 0f;
+            float mouthAL = SourceWeight(frame, "kuti_face.f00_a_l_op");
+            float mouthNL = SourceWeight(frame, "kuti_face.f00_n_l_cl");
+            float mouthPattern26State = (frame.MouthPattern == 26 && mouthAL >= 0.60f && mouthNL >= 0.10f) ? 1f : 0f;
             float mouthIS = SourceWeight(frame, "kuti_face.f00_i_s_op");
             float mouthIkariOpen = SourceWeight(frame, "kuti_face.f00_ikari_op");
             float mouthKeno = SourceWeight(frame, "kuti_face.f00_keno_op");
@@ -515,7 +562,7 @@ namespace KKBridge
                 SourceWeight(frame, "kuti_face.f00_ikari02_op"));
 
             float anyCalibratedMouth = Mathf.Max(
-                Mathf.Max(mouthAkire, Mathf.Max(mouthOdoro, Mathf.Max(mouthOdoroSmall, mouthPattern18))),
+                Mathf.Max(mouthAkire, Mathf.Max(mouthOdoro, Mathf.Max(mouthOdoroSmall, Mathf.Max(mouthPattern18, mouthPattern26State)))),
                 Mathf.Max(mouthIS, Mathf.Max(mouthIkariOpen, Mathf.Max(mouthKeno, Mathf.Max(mouthSinken03, mouthIkariPair)))));
 
             // 9.60s anchor: closed smile eye + worried brow + smiling E mouth.
@@ -562,6 +609,14 @@ namespace KKBridge
                 AddMax(output, n, "口横狭め", 0.40f * mouthOdoroSmallState);
             }
 
+            // Pattern 26 anchor: a_l ~= 0.75 + n_l ~= 0.25.
+            // User-calibrated as fully open O mouth plus the Shenhe tongue-out morph.
+            if (mouthPattern26State > 1E-04f)
+            {
+                AddMax(output, n, "お", 1.00f);
+                AddMax(output, n, "ぺろっ1", 1.00f);
+            }
+
             // 2.20s anchor: slight smile/teeth geometry, deliberately very little E.
             if (mouthIS > 1E-04f)
             {
@@ -596,6 +651,14 @@ namespace KKBridge
             if (mouthSinken03 > 1E-04f)
             {
                 AddMax(output, n, "困る", 0.50f * mouthSinken03);
+            }
+
+            // Conservative fallback for an otherwise-unmapped final KK mouth-open family.
+            // This prevents completely static lips without guessing a detailed Shenhe mouth shape.
+            if (anyCalibratedMouth <= 1E-04f)
+            {
+                float unknownOpen = UnknownMouthOpenWeight(frame);
+                AddMax(output, n, "お", 0.20f * unknownOpen);
             }
 
             // If a scene only contributes the worried brow, preserve it with the established 0.5 cap.
