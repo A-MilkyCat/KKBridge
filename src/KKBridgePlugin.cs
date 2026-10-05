@@ -485,9 +485,13 @@ namespace KKBridge
             {
                 AddMax(output, n, "なごみ", Mathf.Clamp01(eyeSetunai * 0.5556f));
             }
-            else if (frame.EyesPattern == 7 && (frame.BlendShapes == null || frame.BlendShapes.Count == 0))
+            else if (
+                frame.EyesPattern == 7 &&
+                Mathf.Abs(frame.EyesOpen - 0.8437502f) <= 0.02f &&
+                (frame.BlendShapes == null || frame.BlendShapes.Count == 0))
             {
-                // Early frames in this scene expose only the high-level pattern/open state.
+                // Early frames in this scene expose only the calibrated pattern/open state.
+                // Keep this fallback narrow until pattern 7 is calibrated at other open values.
                 AddMax(output, n, "なごみ", 0.35f);
             }
 
