@@ -117,8 +117,40 @@ namespace KKBridge
 
     /// <summary>
     /// Raw facial state sampled directly from the live Koikatsu character after Timeline/runtime updates.
-    /// This intentionally stores semantic/control channels only and does NOT guess any PMX/BlendShape mapping.
+    /// In addition to semantic/control channels, V2 records the final active facial BlendShapes and
+    /// local transforms for every descendant whose name contains "hitomi".
+    /// No PMX morph mapping is applied here.
     /// </summary>
+    internal sealed class RawBlendShapeSample
+    {
+        public string RendererName;
+        public string BlendShapeName;
+        public float WeightPercent;
+    }
+
+    internal sealed class RawBlendShapeSource
+    {
+        public SkinnedMeshRenderer Renderer;
+        public int Index;
+        public string RendererName;
+        public string BlendShapeName;
+    }
+
+    internal sealed class RawHitomiSample
+    {
+        public string Name;
+        public Vector3 LocalPosition;
+        public Quaternion LocalRotation;
+        public Vector3 LocalEuler;
+        public Vector3 LocalScale;
+    }
+
+    internal sealed class RawFacialCaptureContext
+    {
+        public readonly List<RawBlendShapeSource> BlendShapes = new List<RawBlendShapeSource>();
+        public readonly List<Transform> HitomiTransforms = new List<Transform>();
+    }
+
     internal sealed class RawFacialFrame
     {
         public uint FrameNumber;
@@ -129,15 +161,106 @@ namespace KKBridge
         public float EyesOpen;
         public int MouthPattern;
         public float MouthOpen;
+        public List<RawBlendShapeSample> BlendShapes;
+        public List<RawHitomiSample> HitomiTransforms;
     }
 
     internal static class RawFacialExporter
     {
-        public static RawFacialFrame Capture(OCIChar ociChar, uint frameNumber, float timelineTime)
+        private static bool IsFacialBlendShapeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+
+            // Keep the raw face families broad on purpose. This captures the final KK facial state
+            // before the existing config.json PMX mapping discards or merges channels.
+            return name.StartsWith("eye_", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("mayuge.", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("kuti_", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static RawFacialCaptureContext CreateContext(OCIChar ociChar)
+        {
+            var context = new RawFacialCaptureContext();
+            if (ociChar == null || ociChar.charInfo == null) return context;
+
+            Transform root = ociChar.charInfo.transform;
+            if (root == null) return context;
+
+            var renderers = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null || renderer.sharedMesh == null) continue;
+
+                int blendShapeCount = renderer.sharedMesh.blendShapeCount;
+                for (int index = 0; index < blendShapeCount; index++)
+                {
+                    string blendShapeName = renderer.sharedMesh.GetBlendShapeName(index);
+                    if (!IsFacialBlendShapeName(blendShapeName)) continue;
+
+                    context.BlendShapes.Add(new RawBlendShapeSource
+                    {
+                        Renderer = renderer,
+                        Index = index,
+                        RendererName = renderer.name,
+                        BlendShapeName = blendShapeName
+                    });
+                }
+            }
+
+            var transforms = root.GetComponentsInChildren<Transform>(true);
+            foreach (var tf in transforms)
+            {
+                if (tf == null || string.IsNullOrEmpty(tf.name)) continue;
+                if (tf.name.IndexOf("hitomi", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    context.HitomiTransforms.Add(tf);
+                }
+            }
+
+            return context;
+        }
+
+        public static RawFacialFrame Capture(
+            OCIChar ociChar,
+            uint frameNumber,
+            float timelineTime,
+            RawFacialCaptureContext context)
         {
             if (ociChar == null || ociChar.charInfo == null) return null;
+            if (context == null) context = CreateContext(ociChar);
 
             ChaControl cha = ociChar.charInfo;
+            var blendShapes = new List<RawBlendShapeSample>();
+            foreach (var source in context.BlendShapes)
+            {
+                if (source == null || source.Renderer == null) continue;
+
+                float weightPercent = source.Renderer.GetBlendShapeWeight(source.Index);
+                if (Mathf.Abs(weightPercent) <= 1E-04f) continue;
+
+                blendShapes.Add(new RawBlendShapeSample
+                {
+                    RendererName = source.RendererName,
+                    BlendShapeName = source.BlendShapeName,
+                    WeightPercent = weightPercent
+                });
+            }
+
+            var hitomiTransforms = new List<RawHitomiSample>();
+            foreach (var tf in context.HitomiTransforms)
+            {
+                if (tf == null) continue;
+
+                hitomiTransforms.Add(new RawHitomiSample
+                {
+                    Name = tf.name,
+                    LocalPosition = tf.localPosition,
+                    LocalRotation = tf.localRotation,
+                    LocalEuler = tf.localEulerAngles,
+                    LocalScale = tf.localScale
+                });
+            }
+
             return new RawFacialFrame
             {
                 FrameNumber = frameNumber,
@@ -147,17 +270,60 @@ namespace KKBridge
                 EyesPattern = cha.GetEyesPtn(),
                 EyesOpen = cha.GetEyesOpenMax(),
                 MouthPattern = cha.GetMouthPtn(),
-                MouthOpen = cha.GetMouthOpenMax()
+                MouthOpen = cha.GetMouthOpenMax(),
+                BlendShapes = blendShapes,
+                HitomiTransforms = hitomiTransforms
             };
+        }
+
+        private static string EscapeJson(string value)
+        {
+            if (value == null) return string.Empty;
+            return value
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "\\t");
+        }
+
+        private static void AppendFloat(StringBuilder sb, float value)
+        {
+            sb.Append(value.ToString("R", CultureInfo.InvariantCulture));
+        }
+
+        private static void AppendVector3(StringBuilder sb, Vector3 value)
+        {
+            sb.Append("[");
+            AppendFloat(sb, value.x);
+            sb.Append(",");
+            AppendFloat(sb, value.y);
+            sb.Append(",");
+            AppendFloat(sb, value.z);
+            sb.Append("]");
+        }
+
+        private static void AppendQuaternion(StringBuilder sb, Quaternion value)
+        {
+            sb.Append("[");
+            AppendFloat(sb, value.x);
+            sb.Append(",");
+            AppendFloat(sb, value.y);
+            sb.Append(",");
+            AppendFloat(sb, value.z);
+            sb.Append(",");
+            AppendFloat(sb, value.w);
+            sb.Append("]");
         }
 
         public static void Export(IList<RawFacialFrame> frames, int fps, string path)
         {
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"format\": \"KKBridgeRawFacialV1\",\n");
+            sb.Append("  \"format\": \"KKBridgeRawFacialV2\",\n");
             sb.Append("  \"fps\": ").Append(fps.ToString(CultureInfo.InvariantCulture)).Append(",\n");
-            sb.Append("  \"channels\": [\"eyebrow_pattern\", \"eyebrow_open\", \"eyes_pattern\", \"eyes_open\", \"mouth_pattern\", \"mouth_open\"],\n");
+            sb.Append("  \"channels\": [\"eyebrow_pattern\", \"eyebrow_open\", \"eyes_pattern\", \"eyes_open\", \"mouth_pattern\", \"mouth_open\", \"facial_blendshapes\", \"hitomi_transforms\"],\n");
+            sb.Append("  \"blendshape_weight_unit\": \"percent_0_100\",\n");
             sb.Append("  \"frames\": [\n");
 
             for (int i = 0; i < frames.Count; i++)
@@ -165,13 +331,58 @@ namespace KKBridge
                 RawFacialFrame f = frames[i];
                 sb.Append("    {");
                 sb.Append("\"frame\":").Append(f.FrameNumber.ToString(CultureInfo.InvariantCulture)).Append(",");
-                sb.Append("\"time\":").Append(f.TimelineTime.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"time\":");
+                AppendFloat(sb, f.TimelineTime);
+                sb.Append(",");
                 sb.Append("\"eyebrow_pattern\":").Append(f.EyebrowPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
-                sb.Append("\"eyebrow_open\":").Append(f.EyebrowOpen.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyebrow_open\":");
+                AppendFloat(sb, f.EyebrowOpen);
+                sb.Append(",");
                 sb.Append("\"eyes_pattern\":").Append(f.EyesPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
-                sb.Append("\"eyes_open\":").Append(f.EyesOpen.ToString("R", CultureInfo.InvariantCulture)).Append(",");
+                sb.Append("\"eyes_open\":");
+                AppendFloat(sb, f.EyesOpen);
+                sb.Append(",");
                 sb.Append("\"mouth_pattern\":").Append(f.MouthPattern.ToString(CultureInfo.InvariantCulture)).Append(",");
-                sb.Append("\"mouth_open\":").Append(f.MouthOpen.ToString("R", CultureInfo.InvariantCulture));
+                sb.Append("\"mouth_open\":");
+                AppendFloat(sb, f.MouthOpen);
+
+                sb.Append(",\"facial_blendshapes\":[");
+                if (f.BlendShapes != null)
+                {
+                    for (int j = 0; j < f.BlendShapes.Count; j++)
+                    {
+                        RawBlendShapeSample sample = f.BlendShapes[j];
+                        if (j > 0) sb.Append(",");
+                        sb.Append("{\"renderer\":\"").Append(EscapeJson(sample.RendererName)).Append("\",");
+                        sb.Append("\"name\":\"").Append(EscapeJson(sample.BlendShapeName)).Append("\",");
+                        sb.Append("\"weight\":");
+                        AppendFloat(sb, sample.WeightPercent);
+                        sb.Append("}");
+                    }
+                }
+                sb.Append("]");
+
+                sb.Append(",\"hitomi_transforms\":[");
+                if (f.HitomiTransforms != null)
+                {
+                    for (int j = 0; j < f.HitomiTransforms.Count; j++)
+                    {
+                        RawHitomiSample sample = f.HitomiTransforms[j];
+                        if (j > 0) sb.Append(",");
+                        sb.Append("{\"name\":\"").Append(EscapeJson(sample.Name)).Append("\",");
+                        sb.Append("\"local_position\":");
+                        AppendVector3(sb, sample.LocalPosition);
+                        sb.Append(",\"local_rotation\":");
+                        AppendQuaternion(sb, sample.LocalRotation);
+                        sb.Append(",\"local_euler\":");
+                        AppendVector3(sb, sample.LocalEuler);
+                        sb.Append(",\"local_scale\":");
+                        AppendVector3(sb, sample.LocalScale);
+                        sb.Append("}");
+                    }
+                }
+                sb.Append("]");
+
                 sb.Append("}");
                 if (i + 1 < frames.Count) sb.Append(",");
                 sb.Append("\n");
@@ -699,6 +910,7 @@ namespace KKBridge
                 var allCharactersBoneFrames = new Dictionary<OCIChar, List<VmdBoneFrame>>();
                 var allCharactersMorphFrames = new Dictionary<OCIChar, List<VmdMorphFrame>>();
                 var allCharactersRawFacialFrames = new Dictionary<OCIChar, List<RawFacialFrame>>();
+                var rawFacialCaptureContexts = new Dictionary<OCIChar, RawFacialCaptureContext>();
                 var allCameraFrames = new List<VmdCameraFrame>();
 
                 var characterBoneCaches = new Dictionary<OCIChar, Dictionary<string, Transform>>();
@@ -708,6 +920,10 @@ namespace KKBridge
                     allCharactersBoneFrames[ociChar] = new List<VmdBoneFrame>();
                     allCharactersMorphFrames[ociChar] = new List<VmdMorphFrame>();
                     allCharactersRawFacialFrames[ociChar] = new List<RawFacialFrame>();
+                    if (_exportRawFacialJson.Value)
+                    {
+                        rawFacialCaptureContexts[ociChar] = RawFacialExporter.CreateContext(ociChar);
+                    }
 
                     // 為每個角色預先建立並儲存骨骼快取
                     var boneCacheForChar = new Dictionary<string, Transform>();
@@ -782,7 +998,11 @@ namespace KKBridge
 
                         if (_exportRawFacialJson.Value)
                         {
-                            RawFacialFrame rawFaceFrame = RawFacialExporter.Capture(ociChar, (uint)currentFrame, currentTime);
+                            RawFacialFrame rawFaceFrame = RawFacialExporter.Capture(
+                                ociChar,
+                                (uint)currentFrame,
+                                currentTime,
+                                rawFacialCaptureContexts[ociChar]);
                             if (rawFaceFrame != null)
                             {
                                 allCharactersRawFacialFrames[ociChar].Add(rawFaceFrame);
