@@ -454,6 +454,7 @@ namespace KKBridge
             // Eyes
             float eyeSmile = SourceWeight(frame, "eye_face.f00_egao_cl");
             float eyeDefaultClosed = SourceWeight(frame, "eye_face.f00_def_cl");
+            float eyeSetunai = SourceWeight(frame, "eye_face.f00_setunai_op");
 
             // Calibrated eyelid curve:
             // ~0.50 and below: visually close enough to neutral on Shenhe
@@ -476,6 +477,19 @@ namespace KKBridge
             }
             AddMax(output, n, "まばたき", blink);
             AddMax(output, n, "笑い", eyeSmile);
+
+            // Pattern 7 / setunai anchor:
+            // observed composite def_cl ~= 0.37 + setunai_op ~= 0.63
+            // visually matches Shenhe "なごみ" ~= 0.35.
+            if (eyeSetunai > 1E-04f)
+            {
+                AddMax(output, n, "なごみ", Mathf.Clamp01(eyeSetunai * 0.5556f));
+            }
+            else if (frame.EyesPattern == 7 && (frame.BlendShapes == null || frame.BlendShapes.Count == 0))
+            {
+                // Early frames in this scene expose only the high-level pattern/open state.
+                AddMax(output, n, "なごみ", 0.35f);
+            }
 
             // Brows / mouths used by the calibrated anchors.
             float browWorried = Mathf.Max(
