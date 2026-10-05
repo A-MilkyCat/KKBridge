@@ -469,6 +469,7 @@ namespace KKBridge
             float mouthAkire = SourceWeight(frame, "kuti_face.f00_akire_op");
             float mouthOdoro = SourceWeight(frame, "kuti_face.f00_odoro_op");
             float mouthIS = SourceWeight(frame, "kuti_face.f00_i_s_op");
+            float mouthKeno = SourceWeight(frame, "kuti_face.f00_keno_op");
             float mouthSinken03 = Mathf.Max(
                 SourceWeight(frame, "kuti_face.f00_sinken03_cl"),
                 SourceWeight(frame, "kuti_face.f00_sinken03_op"));
@@ -478,7 +479,7 @@ namespace KKBridge
 
             float anyCalibratedMouth = Mathf.Max(
                 Mathf.Max(mouthAkire, mouthOdoro),
-                Mathf.Max(mouthIS, Mathf.Max(mouthSinken03, mouthIkariPair)));
+                Mathf.Max(mouthIS, Mathf.Max(mouthKeno, Mathf.Max(mouthSinken03, mouthIkariPair))));
 
             // 9.60s anchor: closed smile eye + worried brow + smiling E mouth.
             if (eyeSmile > 1E-04f)
@@ -519,6 +520,13 @@ namespace KKBridge
             {
                 AddMax(output, n, "口角上げ", 0.60f * mouthIS);
                 AddMax(output, n, "え", 0.10f * mouthIS);
+            }
+
+            // "I'm sorry" scene anchor: keno_op is primarily a small rounded-open mouth on Shenhe.
+            // Tooth renderer animation is intentionally ignored; only the lip silhouette is transferred.
+            if (mouthKeno > 1E-04f)
+            {
+                AddMax(output, n, "お", 0.40f * mouthKeno);
             }
 
             // 1.83s anchor: mixed ikari_cl + ikari02_op geometry.
