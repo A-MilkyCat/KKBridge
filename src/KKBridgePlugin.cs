@@ -394,6 +394,157 @@ namespace KKBridge
         }
     }
 
+
+    /// <summary>
+    /// Shenhe-facing VMD morph mapper.
+    /// This intentionally uses the final live KK BlendShape state captured after Timeline/IK updates,
+    /// and converts only the small set of facial controls that have been visually calibrated on Shenhe.
+    /// Unknown KK shapes are ignored rather than guessed.
+    ///
+    /// V0 note: iris/hitomi translation is still preserved by RawFacialExporter JSON. The current
+    /// Shenhe runtime controls iris translation as transform millimetres rather than a VMD morph,
+    /// so this mapper does not invent a VMD channel for it yet.
+    /// </summary>
+    internal static class ShenheFacialVmdMapper
+    {
+        private static float SourceWeight(RawFacialFrame frame, string blendShapeName)
+        {
+            if (frame == null || frame.BlendShapes == null || string.IsNullOrEmpty(blendShapeName))
+                return 0f;
+
+            float maxWeight = 0f;
+            foreach (var sample in frame.BlendShapes)
+            {
+                if (sample == null) continue;
+                if (!string.Equals(sample.BlendShapeName, blendShapeName, StringComparison.Ordinal))
+                    continue;
+                maxWeight = Mathf.Max(maxWeight, sample.WeightPercent * 0.01f);
+            }
+            return Mathf.Clamp01(maxWeight);
+        }
+
+        private static void AddMax(Dictionary<string, VmdMorphFrame> frames, uint frameNumber, string morphName, float weight)
+        {
+            weight = Mathf.Clamp01(weight);
+            if (weight <= 1E-04f || string.IsNullOrEmpty(morphName)) return;
+
+            VmdMorphFrame existing;
+            if (frames.TryGetValue(morphName, out existing))
+            {
+                existing.Weight = Mathf.Max(existing.Weight, weight);
+            }
+            else
+            {
+                frames[morphName] = new VmdMorphFrame
+                {
+                    MorphName = morphName,
+                    FrameNumber = frameNumber,
+                    Weight = weight
+                };
+            }
+        }
+
+        public static List<VmdMorphFrame> Map(RawFacialFrame frame)
+        {
+            var output = new Dictionary<string, VmdMorphFrame>();
+            if (frame == null) return output.Values.ToList();
+
+            uint n = frame.FrameNumber;
+
+            // Eyes
+            float eyeSmile = SourceWeight(frame, "eye_face.f00_egao_cl");
+            float eyeDefaultClosed = SourceWeight(frame, "eye_face.f00_def_cl");
+
+            // Treat only the very closed end of def_cl as a real blink/held-eye-close.
+            // This deliberately ignores the common 0.4~0.6 half-lid values that looked nearly neutral on Shenhe.
+            float blink = Mathf.Clamp01((eyeDefaultClosed - 0.85f) / 0.15f);
+            AddMax(output, n, "まばたき", blink);
+            AddMax(output, n, "笑い", eyeSmile);
+
+            // Brows / mouths used by the calibrated anchors.
+            float browWorried = Mathf.Max(
+                SourceWeight(frame, "mayuge.mayu00_koma_op"),
+                SourceWeight(frame, "mayuge.mayu00_koma_cl"));
+
+            float mouthAkire = SourceWeight(frame, "kuti_face.f00_akire_op");
+            float mouthOdoro = SourceWeight(frame, "kuti_face.f00_odoro_op");
+            float mouthIS = SourceWeight(frame, "kuti_face.f00_i_s_op");
+            float mouthSinken03 = Mathf.Max(
+                SourceWeight(frame, "kuti_face.f00_sinken03_cl"),
+                SourceWeight(frame, "kuti_face.f00_sinken03_op"));
+            float mouthIkariPair = Mathf.Clamp01(
+                SourceWeight(frame, "kuti_face.f00_ikari_cl") +
+                SourceWeight(frame, "kuti_face.f00_ikari02_op"));
+
+            float anyCalibratedMouth = Mathf.Max(
+                Mathf.Max(mouthAkire, mouthOdoro),
+                Mathf.Max(mouthIS, Mathf.Max(mouthSinken03, mouthIkariPair)));
+
+            // 9.60s anchor: closed smile eye + worried brow + smiling E mouth.
+            if (eyeSmile > 1E-04f)
+            {
+                AddMax(output, n, "困る", 0.50f * eyeSmile);
+                AddMax(output, n, "口角上げ", 0.50f * eyeSmile);
+                AddMax(output, n, "え", 1.00f * eyeSmile);
+            }
+
+            // 8.53s vs 5.82s share the same KK akire mouth but differ by eye state.
+            // Interpolate between the two calibrated Shenhe anchors using the strong-eye-close factor.
+            if (mouthAkire > 1E-04f)
+            {
+                float closedMix = blink;
+                float openMix = 1f - closedMix;
+
+                // 8.53s: mabataki 1, worried 0.2, narrow 0.4, O 0.35
+                AddMax(output, n, "困る", mouthAkire * closedMix * 0.20f);
+                AddMax(output, n, "口横狭め", mouthAkire * closedMix * 0.40f);
+                AddMax(output, n, "お", mouthAkire * closedMix * 0.35f);
+
+                // 5.82s: worried 0.5, corner-down 0.7, E 0.5, narrow 0.6
+                AddMax(output, n, "困る", mouthAkire * openMix * 0.50f);
+                AddMax(output, n, "口角下げ", mouthAkire * openMix * 0.70f);
+                AddMax(output, n, "え", mouthAkire * openMix * 0.50f);
+                AddMax(output, n, "口横狭め", mouthAkire * openMix * 0.60f);
+            }
+
+            // 9.88s anchor: large round open mouth.
+            if (mouthOdoro > 1E-04f)
+            {
+                AddMax(output, n, "困る", 0.40f * mouthOdoro);
+                AddMax(output, n, "お", 1.00f * mouthOdoro);
+            }
+
+            // 2.20s anchor: slight smile/teeth geometry, deliberately very little E.
+            if (mouthIS > 1E-04f)
+            {
+                AddMax(output, n, "口角上げ", 0.60f * mouthIS);
+                AddMax(output, n, "え", 0.10f * mouthIS);
+            }
+
+            // 1.83s anchor: mixed ikari_cl + ikari02_op geometry.
+            if (mouthIkariPair > 1E-04f)
+            {
+                AddMax(output, n, "困る", 0.50f * mouthIkariPair);
+                AddMax(output, n, "口横広げ", 0.35f * mouthIkariPair);
+                AddMax(output, n, "え", 0.50f * mouthIkariPair);
+            }
+
+            // 0.00s anchor: closed/tense baseline; the mouth itself was subtle enough to omit.
+            if (mouthSinken03 > 1E-04f)
+            {
+                AddMax(output, n, "困る", 0.50f * mouthSinken03);
+            }
+
+            // If a scene only contributes the worried brow, preserve it with the established 0.5 cap.
+            if (anyCalibratedMouth <= 1E-04f && eyeSmile <= 1E-04f && browWorried > 1E-04f)
+            {
+                AddMax(output, n, "困る", 0.50f * browWorried);
+            }
+
+            return output.Values.ToList();
+        }
+    }
+
     [BepInPlugin("com.rintrint.kkbridge", "KKBridge", "0.0.6")]
     public class KKBridgePlugin : BaseUnityPlugin
     {
@@ -406,6 +557,7 @@ namespace KKBridge
         private ConfigEntry<string> _outputDirectory;
         private ConfigEntry<bool> _normalizeRootToFirstFrame;
         private ConfigEntry<bool> _exportRawFacialJson;
+        private ConfigEntry<bool> _exportShenheFacialVmd;
 
         private void Awake()
         {
@@ -441,6 +593,13 @@ namespace KKBridge
                     "Export Raw Facial JSON",
                     true,
                     "Export raw KK facial control channels next to the VMD. No PMX/BlendShape remapping is applied."
+                );
+
+                _exportShenheFacialVmd = Config.Bind(
+                    "Export Settings",
+                    "Export Shenhe Facial VMD",
+                    true,
+                    "Bake the visually calibrated Shenhe facial morphs directly into the exported VMD. Unknown KK facial shapes are ignored."
                 );
             }
 
@@ -920,7 +1079,7 @@ namespace KKBridge
                     allCharactersBoneFrames[ociChar] = new List<VmdBoneFrame>();
                     allCharactersMorphFrames[ociChar] = new List<VmdMorphFrame>();
                     allCharactersRawFacialFrames[ociChar] = new List<RawFacialFrame>();
-                    if (_exportRawFacialJson.Value)
+                    if (_exportRawFacialJson.Value || _exportShenheFacialVmd.Value)
                     {
                         rawFacialCaptureContexts[ociChar] = RawFacialExporter.CreateContext(ociChar);
                     }
@@ -996,20 +1155,30 @@ namespace KKBridge
                         // 將當前影格的數據添加到對應角色的列表中
                         allCharactersBoneFrames[ociChar].AddRange(singleFrameBoneData);
 
-                        if (_exportRawFacialJson.Value)
+                        RawFacialFrame rawFaceFrame = null;
+                        if (_exportRawFacialJson.Value || _exportShenheFacialVmd.Value)
                         {
-                            RawFacialFrame rawFaceFrame = RawFacialExporter.Capture(
+                            rawFaceFrame = RawFacialExporter.Capture(
                                 ociChar,
                                 (uint)currentFrame,
                                 currentTime,
                                 rawFacialCaptureContexts[ociChar]);
-                            if (rawFaceFrame != null)
+
+                            if (_exportRawFacialJson.Value && rawFaceFrame != null)
                             {
                                 allCharactersRawFacialFrames[ociChar].Add(rawFaceFrame);
                             }
                         }
 
-                        List<VmdMorphFrame> singleFrameMorphData = morphProcessor.ProcessCharacter(ociChar, (uint)currentFrame);
+                        List<VmdMorphFrame> singleFrameMorphData;
+                        if (_exportShenheFacialVmd.Value)
+                        {
+                            singleFrameMorphData = ShenheFacialVmdMapper.Map(rawFaceFrame);
+                        }
+                        else
+                        {
+                            singleFrameMorphData = morphProcessor.ProcessCharacter(ociChar, (uint)currentFrame);
+                        }
                         allCharactersMorphFrames[ociChar].AddRange(singleFrameMorphData);
                     }
 
